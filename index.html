@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Proximity Voice Chat</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #13131a;
+    --surface2: #1c1c28;
+    --border: rgba(255,255,255,0.08);
+    --accent: #4fffb0;
+    --accent2: #6c63ff;
+    --danger: #ff4f6b;
+    --text: #f0f0f8;
+    --muted: #6b6b88;
+    --radius: 12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  header {
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .logo { font-size: 18px; font-weight: 800; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+
+  .header-right { display: flex; align-items: center; gap: 10px; }
+
+  .status-pill {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .status-pill.connected .dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .status-pill.connected { color: var(--accent); border-color: rgba(79,255,176,0.3); }
+  .status-pill.error .dot { background: var(--danger); }
+  .status-pill.error { color: var(--danger); border-color: rgba(255,79,107,0.3); }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  aside {
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .panel { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); }
+  .panel-title {
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--muted); margin-bottom: 10px;
+  }
+
+  .my-id-box {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .my-id-box code {
+    font-family: 'Space Mono', monospace; font-size: 12px;
+    color: var(--accent); word-break: break-all;
+  }
+  .copy-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+    white-space: nowrap; font-family: 'Space Mono', monospace; transition: all 0.15s;
+  }
+  .copy-btn:hover { color: var(--text); border-color: rgba(255,255,255,0.25); }
+
+  .share-link {
+    margin-top: 8px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .share-link span { font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace; word-break: break-all; flex: 1; }
+
+  .input-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  input[type="text"] {
+    flex: 1; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 12px; color: var(--text);
+    font-size: 13px; font-family: 'Space Mono', monospace; outline: none; transition: border 0.15s;
+  }
+  input[type="text"]:focus { border-color: rgba(79,255,176,0.4); }
+  input[type="text"]::placeholder { color: var(--muted); }
+
+  .btn {
+    padding: 8px 16px; border-radius: var(--radius); border: none;
+    font-size: 13px; font-family: 'Syne', sans-serif; font-weight: 600;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+  .btn-accent { background: var(--accent); color: #0a0a0f; }
+  .btn-accent:hover { background: #6fffc3; }
+  .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-ghost:hover { background: var(--surface); border-color: rgba(255,255,255,0.2); }
+
+  .player-list { display: flex; flex-direction: column; gap: 8px; }
+  .player-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; transition: border 0.15s;
+  }
+  .player-card.hearing { border-color: rgba(79,255,176,0.4); }
+  .player-card .p-info { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+  .p-name { font-size: 13px; font-weight: 600; }
+  .p-dist { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted); }
+  .vol-mini { display: flex; align-items: center; gap: 6px; }
+  .vol-mini-bar { width: 50px; height: 4px; background: var(--surface); border-radius: 2px; overflow: hidden; }
+  .vol-mini-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.15s; }
+  .vol-pct-sm { font-family: 'Space Mono', monospace; font-size: 10px; color: var(--muted); min-width: 28px; }
+
+  .mic-section { padding: 1rem 1.25rem; margin-top: auto; border-top: 1px solid var(--border); }
+  .mic-big {
+    width: 100%; padding: 13px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface2);
+    color: var(--text); font-family: 'Syne', sans-serif; font-size: 14px;
+    font-weight: 600; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; gap: 8px; transition: all 0.15s;
+  }
+  .mic-big:hover { background: var(--surface); }
+  .mic-big.active {
+    background: rgba(79,255,176,0.12); border-color: rgba(79,255,176,0.5);
+    color: var(--accent); animation: pulse-border 1.5s infinite;
+  }
+  @keyframes pulse-border {
+    0%,100% { box-shadow: 0 0 0 0 rgba(79,255,176,0.3); }
+    50% { box-shadow: 0 0 0 6px rgba(79,255,176,0); }
+  }
+  .mic-status { margin-top: 6px; text-align: center; font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace; }
+
+  /* MAP */
+  #map-area { position: relative; overflow: hidden; background: var(--bg); }
+  #map-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  .range-ctrl {
+    position: absolute; top: 14px; right: 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 160px; z-index: 20;
+  }
+  .range-ctrl label { font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace; }
+  .range-ctrl input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
+  .log-box {
+    position: absolute; bottom: 36px; left: 14px;
+    background: rgba(13,13,20,0.88); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 12px;
+    font-family: 'Space Mono', monospace; font-size: 10px; color: var(--muted);
+    max-width: 280px; max-height: 100px; overflow-y: auto; z-index: 20;
+  }
+  .log-line { margin-bottom: 2px; }
+  .log-ok   { color: var(--accent); }
+  .log-err  { color: var(--danger); }
+  .log-info { color: #6c63ff; }
+
+  .map-hint {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace;
+    background: rgba(10,10,15,0.7); padding: 4px 14px; border-radius: 99px;
+    border: 1px solid var(--border); pointer-events: none; white-space: nowrap;
+  }
+
+  /* URL auto-join modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 2rem; max-width: 380px; width: 90%; text-align: center;
+  }
+  .modal h3 { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
+  .modal p { font-size: 13px; color: var(--muted); margin-bottom: 1.5rem; line-height: 1.6; }
+  .modal .peer-preview {
+    background: var(--surface2); border-radius: var(--radius); padding: 10px 14px;
+    font-family: 'Space Mono', monospace; font-size: 12px; color: var(--accent);
+    margin-bottom: 1.5rem; word-break: break-all;
+  }
+  .modal-btns { display: flex; gap: 10px; justify-content: center; }
+
+  @media (max-width: 700px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { max-height: 50vh; }
+    #map-area { min-height: 300px; }
+    .log-box { max-width: 200px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Auto-join modal (when opened via share link) -->
+<div class="modal-overlay" id="join-modal">
+  <div class="modal">
+    <h3>เข้าร่วมห้อง</h3>
+    <p>คุณได้รับลิงก์เชิญชวน<br>ต้องการเชื่อมต่อกับผู้เล่นนี้ไหม?</p>
+    <div class="peer-preview" id="modal-peer-id">—</div>
+    <div class="modal-btns">
+      <button class="btn btn-accent" onclick="acceptJoin()">เชื่อมต่อ</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('join-modal').classList.remove('show')">ยกเลิก</button>
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="logo">Proximity<span>Voice</span></div>
+  <div class="header-right">
+    <div class="status-pill" id="status-pill">
+      <div class="dot"></div>
+      <span id="status-text">กำลังเชื่อมต่อ...</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div class="panel">
+      <div class="panel-title">รหัสของฉัน</div>
+      <div class="my-id-box">
+        <code id="my-peer-id">กำลังโหลด...</code>
+        <button class="copy-btn" onclick="copyMyId()">คัดลอก</button>
+      </div>
+      <div class="share-link" id="share-link-box" style="display:none">
+        <span id="share-link-text">—</span>
+        <button class="copy-btn" onclick="copyShareLink()">คัดลอกลิงก์</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">เชื่อมต่อผู้เล่น</div>
+      <div class="input-row">
+        <input type="text" id="connect-id" placeholder="วางรหัสผู้เล่น..." />
+        <button class="btn btn-accent" onclick="connectToPeer()">เชื่อม</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);font-family:'Space Mono',monospace;line-height:1.6;">
+        แชร์รหัส หรือ คัดลอกลิงก์ ให้เพื่อน
+      </div>
+    </div>
+
+    <div class="panel" style="flex:1;min-height:0;overflow-y:auto;">
+      <div class="panel-title">ผู้เล่นในห้อง</div>
+      <div class="player-list" id="player-list">
+        <div style="font-size:12px;color:var(--muted);font-family:'Space Mono',monospace;">
+          ยังไม่มีผู้เล่นเชื่อมต่อ
+        </div>
+      </div>
+    </div>
+
+    <div class="mic-section">
+      <button class="mic-big" id="mic-btn" onclick="toggleMic()">
+        <span id="mic-icon">🎙</span>
+        <span id="mic-label">เปิดไมค์</span>
+      </button>
+      <div class="mic-status" id="mic-status">ไมค์ปิดอยู่</div>
+    </div>
+  </aside>
+
+  <div id="map-area">
+    <canvas id="map-canvas"></canvas>
+    <div class="range-ctrl">
+      <label>ระยะได้ยิน: <span id="range-label">200px</span></label>
+      <input type="range" min="80" max="350" value="200" id="range-slider" oninput="updateRange(this.value)">
+    </div>
+    <div class="log-box" id="log-box"></div>
+    <div class="map-hint">ลาก "ME" บนแผนที่</div>
+  </div>
+</main>
+
+<script>
+// =============================================
+//  CONFIG
+// =============================================
+const HEAR_DIST = { val: 200 };
+const COLORS = [
+  { bg:'#1a2a4a', text:'#7eb8f7', border:'#4a90d9' },
+  { bg:'#1a3a2a', text:'#7effc3', border:'#4fff9c' },
+  { bg:'#3a1a2a', text:'#ff9cc8', border:'#ff4f9c' },
+  { bg:'#2a2a1a', text:'#ffe07e', border:'#ffc84a' },
+  { bg:'#2a1a3a', text:'#b09cff', border:'#7c63ff' },
+  { bg:'#3a2a1a', text:'#ffb07e', border:'#ff8c4a' },
+];
+
+// =============================================
+//  STATE
+// =============================================
+let peer = null;
+let myId = null;
+let localStream = null;
+let micOn = false;
+const peers = {};
+let myPos = { x: 0.5, y: 0.5 };
+let myColorIdx = 0;
+let mapW = 0, mapH = 0;
+let pendingJoinId = null;
+
+// =============================================
+//  URL SHARE — ?join=PEER_ID
+// =============================================
+function getJoinParam() {
+  const p = new URLSearchParams(window.location.search);
+  return p.get('join') || null;
+}
+
+function getShareLink(id) {
+  const base = window.location.href.split('?')[0];
+  return base + '?join=' + encodeURIComponent(id);
+}
+
+function showShareLink(id) {
+  const box = document.getElementById('share-link-box');
+  const txt = document.getElementById('share-link-text');
+  const link = getShareLink(id);
+  txt.textContent = link.length > 50 ? link.slice(0, 50) + '...' : link;
+  txt.title = link;
+  box.style.display = 'flex';
+}
+
+function copyShareLink() {
+  if (!myId) return;
+  navigator.clipboard.writeText(getShareLink(myId)).then(() => {
+    const btn = document.querySelectorAll('.copy-btn')[1];
+    if (btn) { btn.textContent = 'คัดลอกแล้ว!'; setTimeout(() => btn.textContent = 'คัดลอกลิงก์', 1500); }
+  });
+}
+
+function copyMyId() {
+  if (!myId) return;
+  navigator.clipboard.writeText(myId).then(() => {
+    const btn = document.querySelectorAll('.copy-btn')[0];
+    if (btn) { btn.textContent = 'คัดลอกแล้ว!'; setTimeout(() => btn.textContent = 'คัดลอก', 1500); }
+  });
+}
+
+// =============================================
+//  PEERJS INIT
+// =============================================
+function initPeer() {
+  peer = new Peer({ debug: 0 });
+
+  peer.on('open', id => {
+    myId = id;
+    myColorIdx = Math.floor(Math.random() * COLORS.length);
+    document.getElementById('my-peer-id').textContent = id;
+    setStatus('connected', 'เชื่อมต่อแล้ว · ' + id.slice(0,8) + '...');
+    showShareLink(id);
+    log('เชื่อมต่อสำเร็จ รหัส: ' + id.slice(0,8), 'ok');
+
+    // Auto-join if ?join= param exists
+    const joinId = getJoinParam();
+    if (joinId && joinId !== id) {
+      pendingJoinId = joinId;
+      document.getElementById('modal-peer-id').textContent = joinId;
+      document.getElementById('join-modal').classList.add('show');
+    }
+
+    renderMap();
+  });
+
+  peer.on('connection', conn => {
+    log('ผู้เล่นเชื่อมต่อ: ' + conn.peer.slice(0,8), 'ok');
+    setupDataConn(conn);
+  });
+
+  peer.on('call', call => {
+    log('รับสาย voice: ' + call.peer.slice(0,8), 'info');
+    call.answer(localStream || null);
+    handleIncomingCall(call);
+  });
+
+  peer.on('error', e => {
+    log('Error: ' + e.type, 'err');
+    setStatus('error', 'ข้อผิดพลาด: ' + e.type);
+  });
+}
+
+function acceptJoin() {
+  document.getElementById('join-modal').classList.remove('show');
+  if (pendingJoinId) {
+    document.getElementById('connect-id').value = pendingJoinId;
+    connectToPeer();
+    pendingJoinId = null;
+  }
+}
+
+// =============================================
+//  DATA CONNECTION
+// =============================================
+function setupDataConn(conn) {
+  const pid = conn.peer;
+  if (!peers[pid]) {
+    peers[pid] = { conn: null, call: null, audio: null, x: 0.3, y: 0.5, colorIdx: Object.keys(peers).length % COLORS.length };
+  }
+  peers[pid].conn = conn;
+
+  conn.on('open', () => { sendMyPos(pid); });
+
+  conn.on('data', data => {
+    if (data.type === 'pos') {
+      peers[pid].x = data.x;
+      peers[pid].y = data.y;
+      updateAudio();
+      updatePlayerList();
+      renderMap();
+    }
+  });
+
+  conn.on('close', () => {
+    log('ผู้เล่น ' + pid.slice(0,8) + ' ออก', 'err');
+    if (peers[pid] && peers[pid].audio) peers[pid].audio.srcObject = null;
+    delete peers[pid];
+    updatePlayerList();
+    renderMap();
+  });
+
+  updatePlayerList();
+  renderMap();
+}
+
+function sendMyPos(targetId) {
+  const list = targetId ? (peers[targetId] ? [peers[targetId]] : []) : Object.values(peers);
+  list.forEach(pp => {
+    if (pp && pp.conn && pp.conn.open) pp.conn.send({ type: 'pos', x: myPos.x, y: myPos.y });
+  });
+}
+
+// =============================================
+//  VOICE
+// =============================================
+async function getMic() {
+  if (localStream) return localStream;
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    return localStream;
+  } catch(e) {
+    log('ไม่สามารถเข้าถึงไมค์: ' + e.message, 'err');
+    return null;
+  }
+}
+
+async function callPeer(pid) {
+  const stream = await getMic();
+  if (!stream || !peer) return;
+  const call = peer.call(pid, stream);
+  if (!peers[pid]) peers[pid] = { conn: null, call: null, audio: null, x: 0.5, y: 0.5, colorIdx: 0 };
+  peers[pid].call = call;
+  handleIncomingCall(call, pid);
+}
+
+function handleIncomingCall(call, pid) {
+  const id = pid || call.peer;
+  if (!peers[id]) peers[id] = { conn: null, call: null, audio: null, x: 0.5, y: 0.5, colorIdx: 0 };
+  peers[id].call = call;
+
+  call.on('stream', remoteStream => {
+    let audio = peers[id].audio;
+    if (!audio) { audio = new Audio(); audio.autoplay = true; peers[id].audio = audio; }
+    audio.srcObject = remoteStream;
+    updateAudio();
+    log('ได้รับ stream จาก ' + id.slice(0,8), 'ok');
+  });
+
+  call.on('close', () => {
+    if (peers[id] && peers[id].audio) peers[id].audio.srcObject = null;
+  });
+}
+
+// =============================================
+//  PROXIMITY VOLUME
+// =============================================
+function getDist(pid) {
+  if (!peers[pid]) return 9999;
+  const dx = (myPos.x - peers[pid].x) * mapW;
+  const dy = (myPos.y - peers[pid].y) * mapH;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+function getVolume(pid) {
+  const d = getDist(pid);
+  if (d >= HEAR_DIST.val) return 0;
+  return Math.max(0, 1 - d / HEAR_DIST.val);
+}
+
+function updateAudio() {
+  Object.entries(peers).forEach(([pid, pp]) => {
+    if (pp.audio) pp.audio.volume = getVolume(pid);
+  });
+}
+
+// =============================================
+//  UI CONTROLS
+// =============================================
+function connectToPeer() {
+  const id = document.getElementById('connect-id').value.trim();
+  if (!id || id === myId) return;
+  if (peers[id]) { log('เชื่อมต่อแล้ว', 'info'); return; }
+  log('กำลังเชื่อมต่อ ' + id.slice(0,8) + '...', 'info');
+  const conn = peer.connect(id, { reliable: true });
+  setupDataConn(conn);
+  conn.on('open', async () => {
+    log('เชื่อมต่อสำเร็จ!', 'ok');
+    if (micOn) await callPeer(id);
+  });
+  conn.on('error', e => log('เชื่อมต่อล้มเหลว: ' + e, 'err'));
+  document.getElementById('connect-id').value = '';
+}
+
+async function toggleMic() {
+  micOn = !micOn;
+  const btn = document.getElementById('mic-btn');
+  const icon = document.getElementById('mic-icon');
+  const label = document.getElementById('mic-label');
+  const status = document.getElementById('mic-status');
+
+  if (micOn) {
+    const stream = await getMic();
+    if (!stream) { micOn = false; return; }
+    btn.classList.add('active');
+    icon.textContent = '🔴';
+    label.textContent = 'ไมค์เปิดอยู่';
+    status.textContent = 'กำลังส่งเสียง...';
+    log('เปิดไมค์', 'ok');
+    for (const pid of Object.keys(peers)) {
+      if (!peers[pid].call) await callPeer(pid);
+    }
+    stream.getAudioTracks().forEach(t => t.enabled = true);
+  } else {
+    btn.classList.remove('active');
+    icon.textContent = '🎙';
+    label.textContent = 'เปิดไมค์';
+    status.textContent = 'ไมค์ปิดอยู่';
+    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = false);
+    log('ปิดไมค์', 'info');
+  }
+}
+
+function updatePlayerList() {
+  const list = document.getElementById('player-list');
+  const entries = Object.entries(peers);
+  if (entries.length === 0) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--muted);font-family:\'Space Mono\',monospace;">ยังไม่มีผู้เล่นเชื่อมต่อ</div>';
+    return;
+  }
+  list.innerHTML = entries.map(([pid, pp]) => {
+    const d = Math.round(getDist(pid));
+    const vol = Math.round(getVolume(pid) * 100);
+    const c = COLORS[pp.colorIdx || 0];
+    return `
+      <div class="player-card ${vol>0?'hearing':''}">
+        <div class="p-info">
+          <div class="avatar" style="background:${c.bg};color:${c.text}">${pid.slice(0,2).toUpperCase()}</div>
+          <div>
+            <div class="p-name">${pid.slice(0,10)}...</div>
+            <div class="p-dist">${d}px ห่าง</div>
+          </div>
+        </div>
+        <div class="vol-mini">
+          <div class="vol-mini-bar"><div class="vol-mini-fill" style="width:${vol}%"></div></div>
+          <div class="vol-pct-sm">${vol}%</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function updateRange(val) {
+  HEAR_DIST.val = +val;
+  document.getElementById('range-label').textContent = val + 'px';
+  updateAudio(); updatePlayerList(); renderMap();
+}
+
+function setStatus(cls, text) {
+  const pill = document.getElementById('status-pill');
+  pill.className = 'status-pill ' + cls;
+  document.getElementById('status-text').textContent = text;
+}
+
+function log(msg, type) {
+  const box = document.getElementById('log-box');
+  const line = document.createElement('div');
+  line.className = 'log-line log-' + (type||'');
+  const now = new Date();
+  const t = [now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':');
+  line.textContent = '['+t+'] '+msg;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+  if (box.children.length > 30) box.removeChild(box.firstChild);
+}
+
+// =============================================
+//  MAP CANVAS
+// =============================================
+const canvas = document.getElementById('map-canvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const area = document.getElementById('map-area');
+  mapW = canvas.width  = area.offsetWidth;
+  mapH = canvas.height = area.offsetHeight;
+  renderMap();
+}
+
+function renderMap() {
+  if (!mapW || !mapH) return;
+  ctx.clearRect(0, 0, mapW, mapH);
+
+  // grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let x=0; x<mapW; x+=60) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,mapH); ctx.stroke(); }
+  for (let y=0; y<mapH; y+=60) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(mapW,y); ctx.stroke(); }
+
+  const mx = myPos.x * mapW;
+  const my = myPos.y * mapH;
+
+  // hearing ring
+  ctx.save();
+  ctx.beginPath(); ctx.arc(mx, my, HEAR_DIST.val, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(79,255,176,0.15)'; ctx.setLineDash([5,8]); ctx.lineWidth = 1; ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+
+  // connection lines
+  Object.entries(peers).forEach(([pid, pp]) => {
+    const px = pp.x*mapW, py = pp.y*mapH;
+    const vol = getVolume(pid);
+    if (vol <= 0) return;
+    const grad = ctx.createLinearGradient(mx, my, px, py);
+    grad.addColorStop(0, `rgba(79,255,176,${vol*0.6})`);
+    grad.addColorStop(1, `rgba(108,99,255,${vol*0.6})`);
+    ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(px, py);
+    ctx.strokeStyle = grad; ctx.lineWidth = 1+vol*2.5; ctx.stroke();
+  });
+
+  // other players
+  Object.entries(peers).forEach(([pid, pp]) => {
+    const px = pp.x*mapW, py = pp.y*mapH;
+    const c = COLORS[pp.colorIdx||0];
+    ctx.save();
+    ctx.beginPath(); ctx.arc(px, py, 21, 0, Math.PI*2);
+    ctx.fillStyle = c.bg; ctx.fill();
+    ctx.strokeStyle = c.border; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = c.text; ctx.font = 'bold 13px Syne,sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(pid.slice(0,2).toUpperCase(), px, py);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '10px Space Mono,monospace';
+    ctx.fillText(Math.round(getDist(pid))+'px', px, py+32);
+    ctx.restore();
+  });
+
+  // ME
+  ctx.save();
+  ctx.beginPath(); ctx.arc(mx, my, 21, 0, Math.PI*2);
+  ctx.fillStyle = COLORS[myColorIdx].bg; ctx.fill();
+  ctx.strokeStyle = micOn ? '#4fffb0' : COLORS[myColorIdx].border;
+  ctx.lineWidth = micOn ? 3 : 2; ctx.stroke();
+  if (micOn) {
+    ctx.beginPath(); ctx.arc(mx, my, 29, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(79,255,176,0.3)'; ctx.lineWidth = 2; ctx.stroke();
+  }
+  ctx.fillStyle = COLORS[myColorIdx].text; ctx.font = 'bold 13px Syne,sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('ME', mx, my);
+  ctx.fillStyle = 'rgba(79,255,176,0.7)'; ctx.font = '10px Space Mono,monospace';
+  ctx.fillText('คุณ', mx, my+32);
+  ctx.restore();
+}
+
+// MAP DRAG
+let dragging = false;
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  if (Math.hypot(e.clientX-rect.left - myPos.x*mapW, e.clientY-rect.top - myPos.y*mapH) < 28) dragging = true;
+});
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const rect = canvas.getBoundingClientRect();
+  myPos.x = Math.max(0.02, Math.min(0.98, (e.clientX-rect.left)/mapW));
+  myPos.y = Math.max(0.02, Math.min(0.98, (e.clientY-rect.top)/mapH));
+  updateAudio(); updatePlayerList(); renderMap(); sendMyPos();
+});
+canvas.addEventListener('mouseup', () => dragging = false);
+canvas.addEventListener('mouseleave', () => dragging = false);
+
+canvas.addEventListener('touchstart', e => {
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  if (Math.hypot(t.clientX-rect.left - myPos.x*mapW, t.clientY-rect.top - myPos.y*mapH) < 40) {
+    dragging = true; e.preventDefault();
+  }
+}, {passive:false});
+canvas.addEventListener('touchmove', e => {
+  if (!dragging) return; e.preventDefault();
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  myPos.x = Math.max(0.02, Math.min(0.98, (t.clientX-rect.left)/mapW));
+  myPos.y = Math.max(0.02, Math.min(0.98, (t.clientY-rect.top)/mapH));
+  updateAudio(); updatePlayerList(); renderMap(); sendMyPos();
+}, {passive:false});
+canvas.addEventListener('touchend', () => dragging = false);
+
+// INIT
+window.addEventListener('load', () => { resizeCanvas(); initPeer(); });
+window.addEventListener('resize', resizeCanvas);
+setInterval(() => { updatePlayerList(); renderMap(); }, 500);
+</script>
+</body>
+</html>
