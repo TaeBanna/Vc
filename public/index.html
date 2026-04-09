@@ -324,6 +324,9 @@ let mcLastOk  = 0;
 // peers: { playerName -> { conn, call, gainNode, audio, colorIdx, connReady } }
 const peers = {};
 
+// retry cooldown: { playerName -> { nextTry: timestamp, attempts: number } }
+const retryCooldown = {};
+
 let mapW = 0, mapH = 0;
 let camX = 0, camZ = 0;      // world coords ตรงกลาง canvas
 
@@ -513,6 +516,15 @@ function initPeer() {
       setVoiceStatus('warn', 'ชื่อซ้ำในระบบ voice');
       return;
     }
+    if (e.type === 'peer-unavailable') {
+      // อีกคนยังไม่ได้เปิดเว็บ — รอ retry อัตโนมัติ อย่าแสดง error แดง
+      const pid  = String(e.message || '').match(/Could not connect to peer ([\w-]+)/)?.[1] || '';
+      const name = pid ? peerIdToName(pid) : '?';
+      const cd   = retryCooldown[name];
+      const sec  = cd ? Math.round((cd.nextTry - Date.now()) / 1000) : '?';
+      log(`รอ ${name} เปิดเว็บ… retry ใน ${sec}s`, 'warn');
+      return;
+    }
     log('Peer error: ' + e.type, 'err');
     setVoiceStatus('error', 'ผิดพลาด: ' + e.type);
   });
@@ -539,10 +551,14 @@ function syncVoiceConnections() {
   Object.keys(mcPlayers).forEach(name => {
     if (name === myName) return;
     const dist = getBlockDist(myName, name);
-    // เชื่อมเมื่ออยู่ใน 2x วงไมค์ (buffer) เพื่อเตรียม call ไว้ล่วงหน้า
     if (dist < hearDist * 2) {
       const pp = ensurePeer(name);
-      if (!pp.connReady) doConnect(name);
+      // ตรวจ cooldown ก่อน connect ใหม่
+      const cd = retryCooldown[name];
+      const now = Date.now();
+      if (!pp.connReady && (!cd || now >= cd.nextTry)) {
+        doConnect(name);
+      }
       if (micOn && pp.connReady && (!pp.call || !pp.call.open)) callPeer(name);
     }
   });
@@ -558,10 +574,25 @@ function doConnect(name) {
   if (peers[name]?.connReady) return;
   const pid = nameToPeerId(name);
   log('เชื่อม → ' + name, 'info');
+
+  // ตั้ง cooldown ป้องกัน spam (จะล้างถ้าสำเร็จ)
+  const cd = retryCooldown[name] || { attempts: 0, nextTry: 0 };
+  cd.attempts++;
+  // backoff: 3s, 6s, 12s, 24s, max 30s
+  const delay = Math.min(3000 * Math.pow(2, cd.attempts - 1), 30000);
+  cd.nextTry = Date.now() + delay;
+  retryCooldown[name] = cd;
+
   const conn = peer.connect(pid, { reliable: true, serialization: 'json' });
   setupDataConn(conn, name);
-  conn.on('open', async () => { if (micOn) await callPeer(name); });
-  conn.on('error', e => log('conn err ' + name + ': ' + e.type, 'err'));
+  conn.on('open', async () => {
+    // สำเร็จ → ล้าง cooldown
+    retryCooldown[name] = { attempts: 0, nextTry: 0 };
+    if (micOn) await callPeer(name);
+  });
+  conn.on('error', e => {
+    log('conn err ' + name + ': ' + e.type, 'err');
+  });
 }
 
 function setupDataConn(conn, name) {
@@ -577,6 +608,7 @@ function setupDataConn(conn, name) {
 
   conn.on('close', () => {
     log(name + ' ออก', 'err');
+    retryCooldown[name] = { attempts: 0, nextTry: 0 }; // reset ให้ retry ใหม่ได้เลย
     cleanupPeer(name);
     updatePlayerList(); renderMap();
   });
