@@ -1,0 +1,13 @@
+{
+  "name": "proximity-voice-server",
+  "version": "1.0.0",
+  "description": "ProximityVoice Bridge Server for Minecraft",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
