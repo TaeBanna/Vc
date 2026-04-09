@@ -304,7 +304,7 @@
   <div id="map-area">
     <canvas id="map-canvas"></canvas>
     <div class="range-ctrl">
-      <label>ระยะได้ยิน: <span id="range-label">200px</span></label>
+      <label>ระยะวงไมค์: <span id="range-label">200px</span></label>
       <input type="range" min="80" max="350" value="200" id="range-slider" oninput="updateRange(this.value)">
     </div>
     <div class="log-box" id="log-box"></div>
@@ -333,11 +333,12 @@ let peer = null;
 let myId = null;
 let localStream = null;
 let micOn = false;
-const peers = {};
+const peers = {};           // pid -> { conn, call, audio, audioCtx, gainNode, x, y, colorIdx, connReady }
 let myPos = { x: 0.5, y: 0.5 };
 let myColorIdx = 0;
 let mapW = 0, mapH = 0;
 let pendingJoinId = null;
+let audioCtxShared = null;  // shared AudioContext (unlocked on first user gesture)
 
 // =============================================
 //  URL SHARE — ?join=PEER_ID
@@ -378,6 +379,31 @@ function copyMyId() {
 }
 
 // =============================================
+//  AUDIO CONTEXT (unlock autoplay)
+// =============================================
+function getAudioCtx() {
+  if (!audioCtxShared) audioCtxShared = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtxShared.state === 'suspended') audioCtxShared.resume();
+  return audioCtxShared;
+}
+
+// =============================================
+//  PEER SLOT — ensure entry exists
+// =============================================
+function ensurePeer(pid) {
+  if (!peers[pid]) {
+    peers[pid] = {
+      conn: null, call: null,
+      audio: null, audioCtx: null, gainNode: null,
+      x: 0.5, y: 0.5,
+      colorIdx: Object.keys(peers).length % COLORS.length,
+      connReady: false,
+    };
+  }
+  return peers[pid];
+}
+
+// =============================================
 //  PEERJS INIT
 // =============================================
 function initPeer() {
@@ -391,7 +417,6 @@ function initPeer() {
     showShareLink(id);
     log('เชื่อมต่อสำเร็จ รหัส: ' + id.slice(0,8), 'ok');
 
-    // Auto-join if ?join= param exists
     const joinId = getJoinParam();
     if (joinId && joinId !== id) {
       pendingJoinId = joinId;
@@ -402,21 +427,43 @@ function initPeer() {
     renderMap();
   });
 
+  // Incoming data connection (someone connected TO us)
   peer.on('connection', conn => {
     log('ผู้เล่นเชื่อมต่อ: ' + conn.peer.slice(0,8), 'ok');
-    setupDataConn(conn);
+    setupDataConn(conn, false);
   });
 
+  // Incoming voice call
   peer.on('call', call => {
     log('รับสาย voice: ' + call.peer.slice(0,8), 'info');
-    call.answer(localStream || null);
+    // Answer immediately with our stream (or silence stream if mic off)
+    call.answer(localStream || createSilenceStream());
     handleIncomingCall(call);
+  });
+
+  peer.on('disconnected', () => {
+    log('หลุดจาก server กำลัง reconnect...', 'err');
+    setStatus('error', 'หลุดการเชื่อมต่อ...');
+    setTimeout(() => { try { peer.reconnect(); } catch(e){} }, 2000);
   });
 
   peer.on('error', e => {
     log('Error: ' + e.type, 'err');
     setStatus('error', 'ข้อผิดพลาด: ' + e.type);
+    // Auto-retry on peer-unavailable (transient)
+    if (e.type === 'network' || e.type === 'server-error') {
+      setTimeout(initPeer, 3000);
+    }
   });
+}
+
+// Create a silent MediaStream so answer() always has a valid stream
+function createSilenceStream() {
+  try {
+    const ctx = getAudioCtx();
+    const dst = ctx.createMediaStreamDestination();
+    return dst.stream;
+  } catch(e) { return null; }
 }
 
 function acceptJoin() {
@@ -431,29 +478,53 @@ function acceptJoin() {
 // =============================================
 //  DATA CONNECTION
 // =============================================
-function setupDataConn(conn) {
+function setupDataConn(conn, isInitiator) {
   const pid = conn.peer;
-  if (!peers[pid]) {
-    peers[pid] = { conn: null, call: null, audio: null, x: 0.3, y: 0.5, colorIdx: Object.keys(peers).length % COLORS.length };
+  const pp = ensurePeer(pid);
+  // Replace stale connection if any
+  if (pp.conn && pp.conn !== conn) {
+    try { pp.conn.close(); } catch(e) {}
   }
-  peers[pid].conn = conn;
+  pp.conn = conn;
 
-  conn.on('open', () => { sendMyPos(pid); });
+  conn.on('open', () => {
+    pp.connReady = true;
+    // Send my position and full peer list so the new player can mesh with everyone
+    sendMyPos(pid);
+    sendPeerList(pid);
+    updatePlayerList();
+    renderMap();
+    log('data channel เปิดแล้ว: ' + pid.slice(0,8), 'ok');
+  });
 
   conn.on('data', data => {
     if (data.type === 'pos') {
-      peers[pid].x = data.x;
-      peers[pid].y = data.y;
+      pp.x = data.x;
+      pp.y = data.y;
       updateAudio();
       updatePlayerList();
       renderMap();
+    } else if (data.type === 'peer_list') {
+      // Mesh: connect to any unknown peers we haven't seen
+      (data.ids || []).forEach(id => {
+        if (id && id !== myId && !peers[id]) {
+          log('Mesh → เชื่อมต่อ ' + id.slice(0,8), 'info');
+          doConnect(id);
+        }
+      });
     }
   });
 
   conn.on('close', () => {
     log('ผู้เล่น ' + pid.slice(0,8) + ' ออก', 'err');
-    if (peers[pid] && peers[pid].audio) peers[pid].audio.srcObject = null;
-    delete peers[pid];
+    cleanupPeer(pid);
+    updatePlayerList();
+    renderMap();
+  });
+
+  conn.on('error', e => {
+    log('conn error ' + pid.slice(0,8) + ': ' + e, 'err');
+    cleanupPeer(pid);
     updatePlayerList();
     renderMap();
   });
@@ -463,10 +534,32 @@ function setupDataConn(conn) {
 }
 
 function sendMyPos(targetId) {
-  const list = targetId ? (peers[targetId] ? [peers[targetId]] : []) : Object.values(peers);
+  const list = targetId
+    ? (peers[targetId] ? [peers[targetId]] : [])
+    : Object.values(peers);
   list.forEach(pp => {
-    if (pp && pp.conn && pp.conn.open) pp.conn.send({ type: 'pos', x: myPos.x, y: myPos.y });
+    if (pp && pp.conn && pp.connReady) {
+      try { pp.conn.send({ type: 'pos', x: myPos.x, y: myPos.y }); } catch(e) {}
+    }
   });
+}
+
+// Tell a newly connected peer about all others so they can mesh-connect
+function sendPeerList(targetId) {
+  const pp = peers[targetId];
+  if (!pp || !pp.connReady) return;
+  const ids = Object.keys(peers).filter(id => id !== targetId);
+  if (ids.length === 0) return;
+  try { pp.conn.send({ type: 'peer_list', ids }); } catch(e) {}
+}
+
+function cleanupPeer(pid) {
+  const pp = peers[pid];
+  if (!pp) return;
+  if (pp.audio) { try { pp.audio.srcObject = null; } catch(e) {} }
+  if (pp.gainNode) { try { pp.gainNode.disconnect(); } catch(e) {} }
+  if (pp.call) { try { pp.call.close(); } catch(e) {} }
+  delete peers[pid];
 }
 
 // =============================================
@@ -475,7 +568,10 @@ function sendMyPos(targetId) {
 async function getMic() {
   if (localStream) return localStream;
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false
+    });
     return localStream;
   } catch(e) {
     log('ไม่สามารถเข้าถึงไมค์: ' + e.message, 'err');
@@ -484,30 +580,70 @@ async function getMic() {
 }
 
 async function callPeer(pid) {
+  if (!peer || !peers[pid]) return;
+  const pp = peers[pid];
+  // Don't re-call if already have active call
+  if (pp.call && pp.call.open) return;
   const stream = await getMic();
-  if (!stream || !peer) return;
+  if (!stream) return;
+  log('โทรหา ' + pid.slice(0,8), 'info');
   const call = peer.call(pid, stream);
-  if (!peers[pid]) peers[pid] = { conn: null, call: null, audio: null, x: 0.5, y: 0.5, colorIdx: 0 };
-  peers[pid].call = call;
+  pp.call = call;
   handleIncomingCall(call, pid);
 }
 
 function handleIncomingCall(call, pid) {
   const id = pid || call.peer;
-  if (!peers[id]) peers[id] = { conn: null, call: null, audio: null, x: 0.5, y: 0.5, colorIdx: 0 };
-  peers[id].call = call;
+  const pp = ensurePeer(id);
+  // Close old call if duplicate
+  if (pp.call && pp.call !== call) {
+    try { pp.call.close(); } catch(e) {}
+  }
+  pp.call = call;
 
   call.on('stream', remoteStream => {
-    let audio = peers[id].audio;
-    if (!audio) { audio = new Audio(); audio.autoplay = true; peers[id].audio = audio; }
-    audio.srcObject = remoteStream;
-    updateAudio();
+    attachAudio(id, remoteStream);
     log('ได้รับ stream จาก ' + id.slice(0,8), 'ok');
+    updateAudio();
+    updatePlayerList();
+    renderMap();
   });
 
   call.on('close', () => {
-    if (peers[id] && peers[id].audio) peers[id].audio.srcObject = null;
+    if (peers[id] && peers[id].audio) {
+      try { peers[id].audio.srcObject = null; } catch(e) {}
+    }
   });
+
+  call.on('error', e => log('call error ' + id.slice(0,8) + ': ' + e, 'err'));
+}
+
+// Attach remote stream via Web Audio API for volume control (avoids browser autoplay block)
+function attachAudio(pid, remoteStream) {
+  const pp = peers[pid];
+  if (!pp) return;
+  try {
+    const ctx = getAudioCtx();
+    // Disconnect old nodes
+    if (pp.gainNode) { try { pp.gainNode.disconnect(); } catch(e) {} }
+
+    const source = ctx.createMediaStreamSource(remoteStream);
+    const gain = ctx.createGain();
+    gain.gain.value = getVolume(pid);
+    source.connect(gain);
+    gain.connect(ctx.destination);
+
+    pp.gainNode = gain;
+    // Also keep an <audio> as fallback to keep stream alive in Safari
+    if (!pp.audio) { pp.audio = new Audio(); pp.audio.muted = true; }
+    pp.audio.srcObject = remoteStream;
+    pp.audio.play().catch(() => {});
+  } catch(e) {
+    // Fallback: plain <audio>
+    if (!pp.audio) { pp.audio = new Audio(); pp.audio.autoplay = true; }
+    pp.audio.srcObject = remoteStream;
+    pp.audio.volume = getVolume(pid);
+  }
 }
 
 // =============================================
@@ -528,29 +664,40 @@ function getVolume(pid) {
 
 function updateAudio() {
   Object.entries(peers).forEach(([pid, pp]) => {
-    if (pp.audio) pp.audio.volume = getVolume(pid);
+    const vol = getVolume(pid);
+    if (pp.gainNode) {
+      try { pp.gainNode.gain.value = vol; } catch(e) {}
+    } else if (pp.audio) {
+      pp.audio.volume = vol;
+    }
   });
 }
 
 // =============================================
 //  UI CONTROLS
 // =============================================
-function connectToPeer() {
-  const id = document.getElementById('connect-id').value.trim();
-  if (!id || id === myId) return;
-  if (peers[id]) { log('เชื่อมต่อแล้ว', 'info'); return; }
+function doConnect(id) {
+  if (!id || id === myId || peers[id]?.connReady) return;
   log('กำลังเชื่อมต่อ ' + id.slice(0,8) + '...', 'info');
-  const conn = peer.connect(id, { reliable: true });
-  setupDataConn(conn);
+  const conn = peer.connect(id, { reliable: true, serialization: 'json' });
+  setupDataConn(conn, true);
   conn.on('open', async () => {
-    log('เชื่อมต่อสำเร็จ!', 'ok');
     if (micOn) await callPeer(id);
   });
   conn.on('error', e => log('เชื่อมต่อล้มเหลว: ' + e, 'err'));
+}
+
+function connectToPeer() {
+  const id = document.getElementById('connect-id').value.trim();
+  if (!id || id === myId) return;
+  if (peers[id]?.connReady) { log('เชื่อมต่ออยู่แล้ว', 'info'); return; }
+  doConnect(id);
   document.getElementById('connect-id').value = '';
 }
 
 async function toggleMic() {
+  // Unlock AudioContext on first user gesture
+  getAudioCtx();
   micOn = !micOn;
   const btn = document.getElementById('mic-btn');
   const icon = document.getElementById('mic-icon');
@@ -565,10 +712,11 @@ async function toggleMic() {
     label.textContent = 'ไมค์เปิดอยู่';
     status.textContent = 'กำลังส่งเสียง...';
     log('เปิดไมค์', 'ok');
-    for (const pid of Object.keys(peers)) {
-      if (!peers[pid].call) await callPeer(pid);
-    }
     stream.getAudioTracks().forEach(t => t.enabled = true);
+    // Call all connected peers
+    for (const pid of Object.keys(peers)) {
+      await callPeer(pid);
+    }
   } else {
     btn.classList.remove('active');
     icon.textContent = '🎙';
@@ -590,13 +738,14 @@ function updatePlayerList() {
     const d = Math.round(getDist(pid));
     const vol = Math.round(getVolume(pid) * 100);
     const c = COLORS[pp.colorIdx || 0];
+    const ready = pp.connReady ? '' : ' style="opacity:0.5"';
     return `
-      <div class="player-card ${vol>0?'hearing':''}">
+      <div class="player-card ${vol>0?'hearing':''}"${ready}>
         <div class="p-info">
           <div class="avatar" style="background:${c.bg};color:${c.text}">${pid.slice(0,2).toUpperCase()}</div>
           <div>
             <div class="p-name">${pid.slice(0,10)}...</div>
-            <div class="p-dist">${d}px ห่าง</div>
+            <div class="p-dist">${pp.connReady ? d+'px ห่าง' : 'กำลังเชื่อม...'}</div>
           </div>
         </div>
         <div class="vol-mini">
@@ -628,7 +777,7 @@ function log(msg, type) {
   line.textContent = '['+t+'] '+msg;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
-  if (box.children.length > 30) box.removeChild(box.firstChild);
+  if (box.children.length > 50) box.removeChild(box.firstChild);
 }
 
 // =============================================
@@ -657,7 +806,7 @@ function renderMap() {
   const mx = myPos.x * mapW;
   const my = myPos.y * mapH;
 
-  // hearing ring
+  // mic ring
   ctx.save();
   ctx.beginPath(); ctx.arc(mx, my, HEAR_DIST.val, 0, Math.PI*2);
   ctx.strokeStyle = 'rgba(79,255,176,0.15)'; ctx.setLineDash([5,8]); ctx.lineWidth = 1; ctx.stroke();
@@ -743,7 +892,7 @@ canvas.addEventListener('touchend', () => dragging = false);
 // INIT
 window.addEventListener('load', () => { resizeCanvas(); initPeer(); });
 window.addEventListener('resize', resizeCanvas);
-setInterval(() => { updatePlayerList(); renderMap(); }, 500);
+setInterval(() => { updatePlayerList(); renderMap(); sendMyPos(); updateAudio(); }, 500);
 </script>
 </body>
 </html>
